@@ -8,9 +8,16 @@ import (
 	"strings"
 )
 
+type requestState int
+
+const (
+	requestStateInitialized requestState = iota
+	requestStateDone
+)
+
 type Request struct {
 	RequestLine RequestLine
-	State       int // 0 Initialized, 1 Done
+	State       requestState // 0 Initialized, 1 Done
 }
 
 type RequestLine struct {
@@ -19,48 +26,107 @@ type RequestLine struct {
 	Method        string
 }
 
-func (r *Request) parse(data []byte) (int, error) {
+const bufferSize = 8
 
+func (r *Request) parse(data []byte) (int, error) {
+	if r.State == requestStateDone {
+		return 0, errors.New("parse error: trying to parse during Request `Done` state")
+	}
+
+	if r.State != 0 {
+		return 0, errors.New("parse error: unknown Request state")
+	}
+
+	requestLine, n, err := parseRequestLine(data)
+	if err != nil {
+		return 0, err
+	}
+
+	if n == 0 {
+		return 0, nil
+	}
+	r.RequestLine = requestLine
+	r.State = requestStateDone
+
+	return n, nil
 }
 
 func RequestFromReader(reader io.Reader) (*Request, error) {
-	fullRequest, err := io.ReadAll(reader)
-	if err != nil {
-		return nil, err
+	readToIndex := 0
+	buffer := make([]byte, bufferSize)
+
+	request := &Request{
+		State: requestStateInitialized,
 	}
 
-	requestLine, _, err := parseRequestLine(fullRequest)
-	if err != nil {
-		return nil, err
+	for request.State == requestStateInitialized {
+		if len(buffer) >= readToIndex {
+			extendedBuffer := make([]byte, len(buffer)*2)
+			copy(extendedBuffer, buffer)
+			buffer = extendedBuffer
+		}
+		readCount, err := reader.Read(buffer[readToIndex:])
+
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				request.State = requestStateDone
+				break
+			}
+			return nil, err
+		}
+
+		readToIndex += readCount
+
+		parseCount, err := request.parse(buffer[:readToIndex])
+		if err != nil {
+			return nil, err
+		}
+
+		// HACK - CLEARS BUFFER IF WE HAVE PARSE COUNT
+		copy(buffer, buffer[parseCount:])
+		readToIndex -= parseCount
 	}
 
-	return &Request{
-		RequestLine: requestLine,
-	}, nil
+	return request, nil
 }
 
 func parseRequestLine(request []byte) (RequestLine, int, error) {
+	//WAIT FOR FULL REQUEST STRING
 	requestString := string(request)
-	requestLineString := strings.Split(requestString, "\r\n")[0]
 
-	if requestLineString == "" {
+	requestParts := strings.Split(requestString, "\r\n")
+
+	if len(requestParts) <= 1 {
 		return RequestLine{}, 0, nil
 	}
 
+	requestLineString := requestParts[0]
+
+	requestLine, err := parseRequestLineFromString(requestLineString)
+
+	if err != nil {
+		return RequestLine{}, 0, err
+	}
+
+	return requestLine, len(requestLineString) + 2, nil
+}
+
+func parseRequestLineFromString(requestLineString string) (RequestLine, error) {
+	fmt.Println(requestLineString)
 	requestLineParts := strings.Split(requestLineString, " ")
 
 	if len(requestLineParts) != 3 {
-		return RequestLine{}, len(request), errors.New("Bad request line")
+		return RequestLine{}, errors.New("not enough request line parts")
 	}
 
 	httpVersionParts := strings.Split(requestLineParts[2], "/")
 
 	if len(httpVersionParts) != 2 {
-		return RequestLine{}, len(request), errors.New("Bad http version")
+		return RequestLine{}, errors.New("not enough request http version parts")
 	}
 
 	if httpVersionParts[0] != "HTTP" {
-		return RequestLine{}, len(request), fmt.Errorf("unrecognized HTTP-version: %s", httpVersionParts[0])
+		return RequestLine{}, fmt.Errorf("unrecognized HTTP-version: %s", httpVersionParts[0])
 	}
 
 	requestLine := RequestLine{
@@ -72,10 +138,10 @@ func parseRequestLine(request []byte) (RequestLine, int, error) {
 	err := validateRequestLine(requestLine)
 
 	if err != nil {
-		return RequestLine{}, len(request), err
+		return RequestLine{}, err
 	}
 
-	return requestLine, len(request), nil
+	return requestLine, nil
 }
 
 func validateRequestLine(rl RequestLine) error {
