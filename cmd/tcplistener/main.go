@@ -1,11 +1,9 @@
 package main
 
 import (
-	"errors"
 	"fmt"
-	"io"
 	"net"
-	"strings"
+	"tcp_to_http/internal/request"
 )
 
 func main() {
@@ -28,53 +26,14 @@ func main() {
 		fmt.Println("Connection has been accepted")
 
 		// Get lines async
-		lineChan := getLinesChannel(conn)
-
-		for line := range lineChan {
-			fmt.Printf("%s\n", line)
+		req, err := request.RequestFromReader(conn)
+		if err != nil {
+			fmt.Printf("request.RequestFromReader error: %v", err)
+			continue
 		}
+
+		fmt.Printf("\tRequest line: \n\t\t- Method: %v\n\t\t- Target: %v\n\t\t- Version: %v\n", req.RequestLine.Method, req.RequestLine.RequestTarget, req.RequestLine.HttpVersion)
 
 		fmt.Println("Connection has been closed")
 	}
-}
-
-func getLinesChannel(f io.ReadCloser) <-chan string {
-	lineChan := make(chan string)
-
-	go func() {
-		defer f.Close()
-		defer close(lineChan)
-
-		chunk := make([]byte, 8)
-		line := ""
-
-		for n, err := f.Read(chunk); ; n, err = f.Read(chunk) {
-			if err != nil {
-				if errors.Is(err, io.EOF) {
-					lineChan <- line
-					break
-				}
-
-				fmt.Printf("error: %s\n", err.Error())
-				break
-			}
-
-			stringFromBytes := string(chunk[:n])
-			stringParts := strings.Split(stringFromBytes, "\n")
-
-			for n, part := range stringParts {
-				if n == 0 {
-					line += part
-					continue
-				}
-
-				//Send line
-				lineChan <- line
-				// Reset prev line and store new line part
-				line = part
-			}
-		}
-	}()
-
-	return lineChan
 }
